@@ -172,15 +172,30 @@ jobs:
           toolchain: ${{ inputs.rust-toolchain }}
           targets: ${{ matrix.rust-target }}
 
+      - name: Resolve workspace root
+        id: workspace
+        shell: bash
+        run: |
+          MANIFEST="${{ inputs.manifest-path }}"
+          WORKSPACE_DIR=$(dirname "$MANIFEST")
+          echo "dir=$WORKSPACE_DIR" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.archive-target }}
+          workspaces: ${{ steps.workspace.outputs.dir }}
+          cache-on-failure: true
 
-      - name: Install Zig + cargo-zigbuild
+      - name: Install Zig
         if: matrix.build-tool == 'cargo-zigbuild'
-        run: |
-          pip3 install ziglang cargo-zigbuild
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.build-tool == 'cargo-zigbuild'
+        uses: taiki-e/install-action@cargo-zigbuild
 
       - name: Install cross
         if: matrix.build-tool == 'cross'
