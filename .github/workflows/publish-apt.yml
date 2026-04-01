@@ -1,0 +1,105 @@
+name: Publish Debian Package
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      maintainer:
+        description: 'Package maintainer (Name <email>)'
+        type: string
+        default: 'Automated <automated@github-actions>'
+      section:
+        description: 'Debian section'
+        type: string
+        default: 'utils'
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+      targets:
+        description: 'JSON array of Linux targets to package (default: x86_64 + aarch64 gnu)'
+        type: string
+        default: '["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]'
+    secrets:
+      github-token:
+        description: 'GitHub token for uploading .deb to release'
+        required: true
+
+jobs:
+  publish:
+    name: Build .deb packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build .deb packages
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          for target in $(echo '${{ inputs.targets }}' | sed 's/\[//;s/\]//;s/"//g;s/,/ /g'); do
+            case "$target" in
+              x86_64-unknown-linux-gnu*) DEB_ARCH="amd64" ;;
+              aarch64-unknown-linux-gnu*) DEB_ARCH="arm64" ;;
+              *) continue ;;
+            esac
+
+            ARCHIVE="${{ inputs.binary-name }}-${target}-${TAG}.tar.gz"
+            PKG_DIR="${{ inputs.binary-name }}_${VERSION}_${DEB_ARCH}"
+
+            echo "Building .deb for ${DEB_ARCH}..."
+
+            # Download and extract
+            curl -fsSL "${BASE_URL}/${ARCHIVE}" -o archive.tar.gz
+            mkdir -p extract
+            tar xzf archive.tar.gz -C extract
+
+            # Build .deb structure
+            mkdir -p "${PKG_DIR}/DEBIAN"
+            mkdir -p "${PKG_DIR}/usr/bin"
+
+            # Find binary
+            find extract -name "${{ inputs.binary-name }}" -type f | head -1 | xargs -I{} cp {} "${PKG_DIR}/usr/bin/"
+            chmod 755 "${PKG_DIR}/usr/bin/${{ inputs.binary-name }}"
+
+            cat > "${PKG_DIR}/DEBIAN/control" << CTRL_EOF
+          Package: ${{ inputs.binary-name }}
+          Version: ${VERSION}
+          Section: ${{ inputs.section }}
+          Priority: optional
+          Architecture: ${DEB_ARCH}
+          Maintainer: ${{ inputs.maintainer }}
+          Description: ${{ inputs.description || inputs.binary-name }}
+          Homepage: ${{ inputs.homepage || format('https://github.com/{0}', github.repository) }}
+          CTRL_EOF
+
+            dpkg-deb --build "${PKG_DIR}"
+
+            rm -rf extract archive.tar.gz
+          done
+
+          ls -la *.deb
+
+      - name: Upload .deb packages to release
+        run: |
+          TAG="${{ inputs.tag }}"
+          for deb in *.deb; do
+            gh release upload "${TAG}" "${deb}" --clobber --repo "${{ inputs.source-repo || github.repository }}"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}

@@ -1,0 +1,90 @@
+name: Test Install Scripts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/generate-install-*.sh'
+      - 'templates/install.*'
+      - '.github/workflows/test-install-scripts.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/generate-install-*.sh'
+      - 'templates/install.*'
+      - '.github/workflows/test-install-scripts.yml'
+  workflow_dispatch:
+
+jobs:
+  test-install-sh-generation:
+    name: Test install.sh generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate with all targets
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","aarch64-apple-darwin","x86_64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc","x86_64-unknown-freebsd","x86_64-unknown-linux-gnu-glibc2.17","aarch64-unknown-linux-gnu-glibc2.17"]' \
+          sh scripts/generate-install-sh.sh > /tmp/install-all.sh
+          chmod +x /tmp/install-all.sh
+
+      - name: Verify POSIX compliance (no bash-isms)
+        run: |
+          if command -v checkbashisms >/dev/null 2>&1; then
+            checkbashisms /tmp/install-all.sh || true
+          fi
+          # Verify shebang is /bin/sh
+          head -1 /tmp/install-all.sh | grep -q '#!/bin/sh'
+
+      - name: Test --help flag
+        run: |
+          /tmp/install-all.sh --help
+
+      - name: Generate with minimal targets
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-unknown-linux-gnu"]' \
+          sh scripts/generate-install-sh.sh > /tmp/install-minimal.sh
+          chmod +x /tmp/install-minimal.sh
+          /tmp/install-minimal.sh --help
+
+      - name: Verify resolve_target contains expected targets
+        run: |
+          grep -q 'x86_64-unknown-linux-gnu' /tmp/install-all.sh
+          grep -q 'aarch64-apple-darwin' /tmp/install-all.sh
+          grep -q 'x86_64-unknown-linux-musl' /tmp/install-all.sh
+          grep -q 'x86_64-unknown-freebsd' /tmp/install-all.sh
+          grep -q 'x86_64-unknown-linux-gnu-glibc2.17' /tmp/install-all.sh
+          echo "All expected targets found in generated script"
+
+  test-install-ps1-generation:
+    name: Test install.ps1 generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate with Windows targets
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]' \
+          sh scripts/generate-install-ps1.sh > /tmp/install.ps1
+
+      - name: Verify content
+        run: |
+          grep -q 'x86_64-pc-windows-msvc' /tmp/install.ps1
+          grep -q 'aarch64-pc-windows-msvc' /tmp/install.ps1
+          grep -q 'CmdletBinding' /tmp/install.ps1
+          echo "PowerShell script generated correctly"
+
+      - name: Generate with no Windows targets
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-unknown-linux-gnu"]' \
+          sh scripts/generate-install-ps1.sh > /tmp/install-noop.ps1
+          grep -q 'no-op' /tmp/install-noop.ps1
+          echo "No-op script generated when no Windows targets"

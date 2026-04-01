@@ -1,0 +1,116 @@
+name: Publish Chocolatey Package
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      package-id:
+        description: 'Chocolatey package ID (defaults to binary-name)'
+        type: string
+        default: ''
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      license:
+        description: 'License URL'
+        type: string
+        default: ''
+      authors:
+        description: 'Package authors'
+        type: string
+        default: ''
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+    secrets:
+      choco-api-key:
+        description: 'Chocolatey API key'
+        required: true
+
+jobs:
+  publish:
+    name: Publish Chocolatey package
+    runs-on: windows-latest
+    steps:
+      - name: Gather release info
+        id: info
+        shell: pwsh
+        run: |
+          $repo = "${{ inputs.source-repo || github.repository }}"
+          $tag = "${{ inputs.tag }}"
+          $version = $tag.TrimStart("v")
+          $pkgId = "${{ inputs.package-id || inputs.binary-name }}"
+          $baseUrl = "https://github.com/$repo/releases/download/$tag"
+
+          $checksums = Invoke-WebRequest -Uri "$baseUrl/checksums-sha256.txt" -UseBasicParsing
+          $x86Archive = "${{ inputs.binary-name }}-x86_64-pc-windows-msvc-${tag}.zip"
+          $arm64Archive = "${{ inputs.binary-name }}-aarch64-pc-windows-msvc-${tag}.zip"
+
+          $x86Line = $checksums.Content -split "`n" | Where-Object { $_ -match $x86Archive }
+          $x86Hash = if ($x86Line) { ($x86Line -split '\s+')[0] } else { "" }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "pkg-id=$pkgId" >> $env:GITHUB_OUTPUT
+          "base-url=$baseUrl" >> $env:GITHUB_OUTPUT
+          "x86-archive=$x86Archive" >> $env:GITHUB_OUTPUT
+          "x86-hash=$x86Hash" >> $env:GITHUB_OUTPUT
+
+      - name: Create package
+        shell: pwsh
+        run: |
+          $pkgId = "${{ steps.info.outputs.pkg-id }}"
+          $version = "${{ steps.info.outputs.version }}"
+          $baseUrl = "${{ steps.info.outputs.base-url }}"
+
+          mkdir -p choco/tools
+
+          # nuspec
+          @"
+          <?xml version="1.0"?>
+          <package>
+            <metadata>
+              <id>$pkgId</id>
+              <version>$version</version>
+              <title>${{ inputs.binary-name }}</title>
+              <authors>${{ inputs.authors || 'Unknown' }}</authors>
+              <description>${{ inputs.description || inputs.binary-name }}</description>
+              <projectUrl>${{ inputs.homepage || format('https://github.com/{0}', github.repository) }}</projectUrl>
+              <licenseUrl>${{ inputs.license }}</licenseUrl>
+              <tags>rust cli</tags>
+            </metadata>
+          </package>
+          "@ | Set-Content "choco/$pkgId.nuspec"
+
+          # Install script
+          @"
+          `$ErrorActionPreference = 'Stop'
+          `$url = "$baseUrl/${{ steps.info.outputs.x86-archive }}"
+          `$checksum = "${{ steps.info.outputs.x86-hash }}"
+          `$toolsDir = "`$(Split-Path -parent `$MyInvocation.MyCommand.Definition)"
+
+          Install-ChocolateyZipPackage -PackageName '$pkgId' ``
+            -Url `$url ``
+            -UnzipLocation `$toolsDir ``
+            -Checksum `$checksum ``
+            -ChecksumType 'sha256'
+          "@ | Set-Content "choco/tools/chocolateyInstall.ps1"
+
+      - name: Pack and push
+        shell: pwsh
+        run: |
+          cd choco
+          choco pack
+          choco push --source https://push.chocolatey.org/ --api-key "${{ secrets.choco-api-key }}"

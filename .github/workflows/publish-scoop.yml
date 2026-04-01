@@ -1,0 +1,133 @@
+name: Publish Scoop Manifest
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      bucket-repo:
+        description: 'Scoop bucket repository (e.g. owner/scoop-bucket)'
+        type: string
+        required: true
+      manifest-name:
+        description: 'Manifest filename (defaults to binary-name)'
+        type: string
+        default: ''
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier'
+        type: string
+        default: ''
+      source-repo:
+        description: 'Source repository (defaults to github.repository)'
+        type: string
+        default: ''
+    secrets:
+      bucket-token:
+        description: 'GitHub token with push access to bucket repo'
+        required: true
+
+jobs:
+  publish:
+    name: Publish Scoop manifest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gather release info
+        id: info
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+          CHECKSUMS_URL="${BASE_URL}/checksums-sha256.txt"
+
+          curl -fsSL "$CHECKSUMS_URL" -o checksums.txt
+
+          X86_ARCHIVE="${{ inputs.binary-name }}-x86_64-pc-windows-msvc-${TAG}.zip"
+          ARM_ARCHIVE="${{ inputs.binary-name }}-aarch64-pc-windows-msvc-${TAG}.zip"
+
+          X86_HASH=$(grep "$X86_ARCHIVE" checksums.txt | cut -d' ' -f1 || echo "")
+          ARM_HASH=$(grep "$ARM_ARCHIVE" checksums.txt | cut -d' ' -f1 || echo "")
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "base-url=$BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "x86-archive=$X86_ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "arm-archive=$ARM_ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "x86-hash=$X86_HASH" >> "$GITHUB_OUTPUT"
+          echo "arm-hash=$ARM_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Generate manifest
+        run: |
+          NAME="${{ inputs.manifest-name || inputs.binary-name }}"
+          VERSION="${{ steps.info.outputs.version }}"
+          BASE_URL="${{ steps.info.outputs.base-url }}"
+          HOMEPAGE="${{ inputs.homepage || format('https://github.com/{0}', steps.info.outputs.repo) }}"
+
+          cat > "${NAME}.json" << EOF
+          {
+            "version": "${VERSION}",
+            "description": "${{ inputs.description || inputs.binary-name }}",
+            "homepage": "${HOMEPAGE}",
+            "license": "${{ inputs.license }}",
+            "architecture": {
+              "64bit": {
+                "url": "${BASE_URL}/${{ steps.info.outputs.x86-archive }}",
+                "hash": "${{ steps.info.outputs.x86-hash }}",
+                "extract_dir": "${{ inputs.binary-name }}-x86_64-pc-windows-msvc-${{ inputs.tag }}"
+              },
+              "arm64": {
+                "url": "${BASE_URL}/${{ steps.info.outputs.arm-archive }}",
+                "hash": "${{ steps.info.outputs.arm-hash }}",
+                "extract_dir": "${{ inputs.binary-name }}-aarch64-pc-windows-msvc-${{ inputs.tag }}"
+              }
+            },
+            "bin": "${{ inputs.binary-name }}.exe",
+            "checkver": {
+              "github": "https://github.com/${{ steps.info.outputs.repo }}"
+            },
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/${{ steps.info.outputs.repo }}/releases/download/v\$version/${{ inputs.binary-name }}-x86_64-pc-windows-msvc-v\$version.zip"
+                },
+                "arm64": {
+                  "url": "https://github.com/${{ steps.info.outputs.repo }}/releases/download/v\$version/${{ inputs.binary-name }}-aarch64-pc-windows-msvc-v\$version.zip"
+                }
+              }
+            }
+          }
+          EOF
+
+          # Clean up leading whitespace
+          python3 -c "import json,sys; d=json.load(open('${NAME}.json')); json.dump(d,open('${NAME}.json','w'),indent=4)"
+          cat "${NAME}.json"
+
+      - name: Push manifest to bucket
+        run: |
+          NAME="${{ inputs.manifest-name || inputs.binary-name }}"
+          BUCKET_REPO="${{ inputs.bucket-repo }}"
+
+          git clone "https://x-access-token:${{ secrets.bucket-token }}@github.com/${BUCKET_REPO}.git" bucket
+          mkdir -p bucket/bucket
+          cp "${NAME}.json" "bucket/bucket/${NAME}.json"
+
+          cd bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "bucket/${NAME}.json"
+          git commit -m "Update ${NAME} to ${{ inputs.tag }}"
+          git push

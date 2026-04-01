@@ -1,0 +1,86 @@
+name: Test Build Workflow
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/test.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/test.yml'
+  workflow_dispatch:
+
+jobs:
+  test-build:
+    uses: ./.github/workflows/build.yml
+    with:
+      binary-name: sample-binary
+      targets: '["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]'
+      manifest-path: tests/sample-project/Cargo.toml
+      tag: v0.1.0-test
+      draft: true
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  verify-artifacts:
+    name: Verify build artifacts
+    needs: test-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Verify archives exist
+        run: |
+          test -f dist/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test.tar.gz
+          test -f dist/sample-binary-aarch64-apple-darwin-v0.1.0-test.tar.gz
+          test -f dist/sample-binary-x86_64-pc-windows-msvc-v0.1.0-test.zip
+          echo "All expected archives found"
+
+      - name: Verify checksums
+        run: |
+          cd dist
+          for f in *.sha256; do
+            archive="${f%.sha256}"
+            if [ -f "$archive" ]; then
+              expected=$(cut -d' ' -f1 "$f")
+              actual=$(sha256sum "$archive" | cut -d' ' -f1)
+              if [ "$expected" != "$actual" ]; then
+                echo "FAIL: Checksum mismatch for $archive"
+                exit 1
+              fi
+              echo "OK: $archive"
+            fi
+          done
+
+      - name: Verify tar.gz extracts correctly
+        run: |
+          mkdir -p /tmp/extract-test
+          tar xzf dist/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test.tar.gz -C /tmp/extract-test
+          test -f /tmp/extract-test/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test/sample-binary
+          echo "Extract and binary check passed"
+
+  cleanup:
+    name: Cleanup test release
+    needs: [test-build, verify-artifacts]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Delete test release
+        run: |
+          gh release delete v0.1.0-test --yes --repo "${{ github.repository }}" 2>/dev/null || true
+          git push origin :refs/tags/v0.1.0-test 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,123 @@
+name: Publish mise/asdf Plugin
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      plugin-repo:
+        description: 'Plugin repository (e.g. owner/asdf-mytool)'
+        type: string
+        required: true
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+    secrets:
+      plugin-token:
+        description: 'GitHub token with push access to plugin repo'
+        required: true
+
+jobs:
+  publish:
+    name: Update mise/asdf plugin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone plugin repo
+        run: |
+          git clone "https://x-access-token:${{ secrets.plugin-token }}@github.com/${{ inputs.plugin-repo }}.git" plugin
+
+      - name: Generate plugin scripts
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          BINARY="${{ inputs.binary-name }}"
+          TAG="${{ inputs.tag }}"
+
+          mkdir -p plugin/bin plugin/lib
+
+          # bin/list-all — lists all available versions
+          cat > plugin/bin/list-all << 'LIST_ALL_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          releases=$(curl -fsSL "https://api.github.com/repos/REPO_PLACEHOLDER/releases" \
+            -H "Accept: application/vnd.github+json" | \
+            grep '"tag_name"' | sed 's/.*"tag_name": *"v\([^"]*\)".*/\1/' | tac)
+          echo "$releases" | tr '\n' ' '
+          LIST_ALL_EOF
+          sed -i "s|REPO_PLACEHOLDER|${REPO}|g" plugin/bin/list-all
+
+          # bin/download — downloads a specific version
+          cat > plugin/bin/download << DOWNLOAD_EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          REPO="${REPO}"
+          BINARY="${BINARY}"
+
+          version="\${ASDF_INSTALL_VERSION}"
+          download_dir="\${ASDF_DOWNLOAD_PATH}"
+
+          # Detect platform
+          os="\$(uname -s)"
+          arch="\$(uname -m)"
+
+          case "\$os" in
+            Linux)
+              case "\$arch" in
+                x86_64)  target="x86_64-unknown-linux-gnu" ;;
+                aarch64) target="aarch64-unknown-linux-gnu" ;;
+                *) echo "Unsupported arch: \$arch" >&2; exit 1 ;;
+              esac
+              ;;
+            Darwin)
+              case "\$arch" in
+                x86_64)       target="x86_64-apple-darwin" ;;
+                arm64|aarch64) target="aarch64-apple-darwin" ;;
+                *) echo "Unsupported arch: \$arch" >&2; exit 1 ;;
+              esac
+              ;;
+            *) echo "Unsupported OS: \$os" >&2; exit 1 ;;
+          esac
+
+          url="https://github.com/\${REPO}/releases/download/v\${version}/\${BINARY}-\${target}-v\${version}.tar.gz"
+
+          mkdir -p "\$download_dir"
+          curl -fsSL "\$url" | tar xz -C "\$download_dir" --strip-components=1
+          DOWNLOAD_EOF
+
+          # bin/install — installs from download
+          cat > plugin/bin/install << INSTALL_EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          BINARY="${BINARY}"
+
+          install_dir="\${ASDF_INSTALL_PATH}"
+          download_dir="\${ASDF_DOWNLOAD_PATH}"
+
+          mkdir -p "\${install_dir}/bin"
+          cp "\${download_dir}/\${BINARY}" "\${install_dir}/bin/"
+          chmod +x "\${install_dir}/bin/\${BINARY}"
+          INSTALL_EOF
+
+          chmod +x plugin/bin/{list-all,download,install}
+
+      - name: Push plugin
+        run: |
+          cd plugin
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to push"
+          else
+            git commit -m "Update plugin for ${{ inputs.tag }}"
+            git push
+          fi

@@ -1,0 +1,109 @@
+name: Publish Alpine Package
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier'
+        type: string
+        default: 'MIT'
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+      targets:
+        description: 'JSON array of musl targets to package'
+        type: string
+        default: '["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]'
+    secrets:
+      github-token:
+        description: 'GitHub token for uploading .apk to release'
+        required: true
+
+jobs:
+  publish:
+    name: Build Alpine packages
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - name: Install build tools
+        run: |
+          apk add --no-cache alpine-sdk sudo curl bash
+
+      - name: Build .apk packages
+        shell: bash
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          for target in $(echo '${{ inputs.targets }}' | sed 's/\[//;s/\]//;s/"//g;s/,/ /g'); do
+            case "$target" in
+              x86_64-unknown-linux-musl) APK_ARCH="x86_64" ;;
+              aarch64-unknown-linux-musl) APK_ARCH="aarch64" ;;
+              *) continue ;;
+            esac
+
+            ARCHIVE="${{ inputs.binary-name }}-${target}-${TAG}.tar.gz"
+
+            echo "Building .apk for ${APK_ARCH}..."
+
+            mkdir -p "pkg-${APK_ARCH}"
+            curl -fsSL "${BASE_URL}/${ARCHIVE}" -o archive.tar.gz
+            tar xzf archive.tar.gz -C "pkg-${APK_ARCH}"
+            rm archive.tar.gz
+
+            # Create APKBUILD
+            cat > APKBUILD << APKBUILD_EOF
+          # Maintainer: Automated <automated@github-actions>
+          pkgname=${{ inputs.binary-name }}
+          pkgver=${VERSION}
+          pkgrel=0
+          pkgdesc="${{ inputs.description || inputs.binary-name }}"
+          url="${{ inputs.homepage || format('https://github.com/{0}', github.repository) }}"
+          arch="${APK_ARCH}"
+          license="${{ inputs.license }}"
+          source="${BASE_URL}/${ARCHIVE}"
+
+          package() {
+            mkdir -p "\$pkgdir"/usr/bin
+            install -Dm755 "${{ inputs.binary-name }}" "\$pkgdir"/usr/bin/${{ inputs.binary-name }}
+          }
+          APKBUILD_EOF
+
+            rm -rf "pkg-${APK_ARCH}"
+          done
+
+      - name: Upload packages to release
+        if: hashFiles('*.apk') != ''
+        shell: bash
+        run: |
+          TAG="${{ inputs.tag }}"
+          for apk_file in *.apk; do
+            [ -f "$apk_file" ] || continue
+            # Upload via GitHub API since gh may not be available in Alpine
+            curl -fsSL \
+              -X POST \
+              -H "Authorization: token ${{ secrets.github-token }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${apk_file}" \
+              "https://uploads.github.com/repos/${{ inputs.source-repo || github.repository }}/releases/$(curl -fsSL -H "Authorization: token ${{ secrets.github-token }}" "https://api.github.com/repos/${{ inputs.source-repo || github.repository }}/releases/tags/${TAG}" | grep '"id"' | head -1 | sed 's/[^0-9]//g')/assets?name=${apk_file}"
+          done

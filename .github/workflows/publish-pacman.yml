@@ -1,0 +1,101 @@
+name: Publish Pacman Package
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier'
+        type: string
+        default: 'MIT'
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      repo-name:
+        description: 'Pacman repository name'
+        type: string
+        default: ''
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+    secrets:
+      github-token:
+        description: 'GitHub token for uploading packages to release'
+        required: true
+
+jobs:
+  publish:
+    name: Build pacman packages
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm base-devel curl
+
+      - name: Build packages
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          # Build for x86_64 (native arch on runner)
+          ARCHIVE="${{ inputs.binary-name }}-x86_64-unknown-linux-gnu-${TAG}.tar.gz"
+
+          mkdir -p build && cd build
+
+          cat > PKGBUILD << 'EOF'
+          pkgname=${{ inputs.binary-name }}-bin
+          pkgver=VERSION_PLACEHOLDER
+          pkgrel=1
+          pkgdesc="${{ inputs.description || inputs.binary-name }}"
+          arch=('x86_64')
+          url="${{ inputs.homepage || format('https://github.com/{0}', github.repository) }}"
+          license=('${{ inputs.license }}')
+          provides=('${{ inputs.binary-name }}')
+          conflicts=('${{ inputs.binary-name }}')
+          source=("SOURCE_PLACEHOLDER")
+          sha256sums=('SKIP')
+
+          package() {
+            cd "${srcdir}"
+            find . -name "${{ inputs.binary-name }}" -type f | head -1 | xargs -I{} install -Dm755 {} "${pkgdir}/usr/bin/${{ inputs.binary-name }}"
+          }
+          EOF
+
+          sed -i "s|VERSION_PLACEHOLDER|${VERSION}|g" PKGBUILD
+          sed -i "s|SOURCE_PLACEHOLDER|${BASE_URL}/${ARCHIVE}|g" PKGBUILD
+
+          # Build as non-root user (makepkg requirement)
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c "makepkg -f --noconfirm"
+
+          find . -name "*.pkg.tar.*" -exec cp {} /tmp/ \;
+
+      - name: Upload packages to release
+        run: |
+          TAG="${{ inputs.tag }}"
+          for pkg in /tmp/*.pkg.tar.*; do
+            [ -f "$pkg" ] || continue
+            curl -fsSL \
+              -X POST \
+              -H "Authorization: token ${{ secrets.github-token }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${pkg}" \
+              "https://uploads.github.com/repos/${{ inputs.source-repo || github.repository }}/releases/$(curl -fsSL -H "Authorization: token ${{ secrets.github-token }}" "https://api.github.com/repos/${{ inputs.source-repo || github.repository }}/releases/tags/${TAG}" | grep '"id"' | head -1 | sed 's/[^0-9]//g')/assets?name=$(basename $pkg)"
+          done

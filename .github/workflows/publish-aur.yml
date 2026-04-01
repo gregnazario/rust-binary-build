@@ -1,0 +1,164 @@
+name: Publish to AUR
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      aur-package-name:
+        description: 'AUR package name (defaults to binary-name-bin)'
+        type: string
+        default: ''
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier (e.g. MIT)'
+        type: string
+        default: 'MIT'
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+    secrets:
+      aur-ssh-key:
+        description: 'SSH private key for AUR push access'
+        required: true
+
+jobs:
+  publish:
+    name: Publish AUR package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gather release info
+        id: info
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          PKG_NAME="${{ inputs.aur-package-name }}"
+          if [ -z "$PKG_NAME" ]; then
+            PKG_NAME="${{ inputs.binary-name }}-bin"
+          fi
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+          CHECKSUMS_URL="${BASE_URL}/checksums-sha256.txt"
+
+          curl -fsSL "$CHECKSUMS_URL" -o checksums.txt
+
+          X86_ARCHIVE="${{ inputs.binary-name }}-x86_64-unknown-linux-gnu-${TAG}.tar.gz"
+          ARM_ARCHIVE="${{ inputs.binary-name }}-aarch64-unknown-linux-gnu-${TAG}.tar.gz"
+
+          X86_HASH=$(grep "$X86_ARCHIVE" checksums.txt | cut -d' ' -f1 || echo "SKIP")
+          ARM_HASH=$(grep "$ARM_ARCHIVE" checksums.txt | cut -d' ' -f1 || echo "SKIP")
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "pkg-name=$PKG_NAME" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "base-url=$BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "x86-archive=$X86_ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "arm-archive=$ARM_ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "x86-hash=$X86_HASH" >> "$GITHUB_OUTPUT"
+          echo "arm-hash=$ARM_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Generate PKGBUILD
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          PKG_NAME="${{ steps.info.outputs.pkg-name }}"
+          REPO="${{ steps.info.outputs.repo }}"
+          BASE_URL="${{ steps.info.outputs.base-url }}"
+          TAG="${{ inputs.tag }}"
+
+          cat > PKGBUILD << 'PKGBUILD_HEADER'
+          # Maintainer: Automated <automated@github-actions>
+          PKGBUILD_HEADER
+
+          cat >> PKGBUILD << EOF
+          pkgname=${PKG_NAME}
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="${{ inputs.description || inputs.binary-name }}"
+          arch=('x86_64' 'aarch64')
+          url="${{ inputs.homepage || format('https://github.com/{0}', steps.info.outputs.repo) }}"
+          license=('${{ inputs.license }}')
+          provides=('${{ inputs.binary-name }}')
+          conflicts=('${{ inputs.binary-name }}')
+
+          source_x86_64=("${BASE_URL}/${{ steps.info.outputs.x86-archive }}")
+          source_aarch64=("${BASE_URL}/${{ steps.info.outputs.arm-archive }}")
+          sha256sums_x86_64=('${{ steps.info.outputs.x86-hash }}')
+          sha256sums_aarch64=('${{ steps.info.outputs.arm-hash }}')
+
+          package() {
+            cd "\${srcdir}/${{ inputs.binary-name }}-\${CARCH}-unknown-linux-gnu-${TAG}" 2>/dev/null || cd "\${srcdir}"
+            install -Dm755 "${{ inputs.binary-name }}" "\${pkgdir}/usr/bin/${{ inputs.binary-name }}"
+          }
+          EOF
+
+          sed -i 's/^          //' PKGBUILD
+          cat PKGBUILD
+
+      - name: Generate .SRCINFO
+        run: |
+          # Simple .SRCINFO generator (avoids needing makepkg)
+          PKG_NAME="${{ steps.info.outputs.pkg-name }}"
+          VERSION="${{ steps.info.outputs.version }}"
+
+          cat > .SRCINFO << EOF
+          pkgbase = ${PKG_NAME}
+          	pkgdesc = ${{ inputs.description || inputs.binary-name }}
+          	pkgver = ${VERSION}
+          	pkgrel = 1
+          	url = ${{ inputs.homepage || format('https://github.com/{0}', steps.info.outputs.repo) }}
+          	arch = x86_64
+          	arch = aarch64
+          	license = ${{ inputs.license }}
+          	provides = ${{ inputs.binary-name }}
+          	conflicts = ${{ inputs.binary-name }}
+          	source_x86_64 = ${{ steps.info.outputs.base-url }}/${{ steps.info.outputs.x86-archive }}
+          	sha256sums_x86_64 = ${{ steps.info.outputs.x86-hash }}
+          	source_aarch64 = ${{ steps.info.outputs.base-url }}/${{ steps.info.outputs.arm-archive }}
+          	sha256sums_aarch64 = ${{ steps.info.outputs.arm-hash }}
+
+          pkgname = ${PKG_NAME}
+          EOF
+
+          sed -i 's/^          //' .SRCINFO
+
+      - name: Push to AUR
+        run: |
+          PKG_NAME="${{ steps.info.outputs.pkg-name }}"
+
+          mkdir -p ~/.ssh
+          echo "${{ secrets.aur-ssh-key }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          cat >> ~/.ssh/config << SSH_EOF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            User aur
+          SSH_EOF
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+          git clone "ssh://aur@aur.archlinux.org/${PKG_NAME}.git" aur-repo 2>/dev/null || {
+            mkdir aur-repo && cd aur-repo && git init
+            git remote add origin "ssh://aur@aur.archlinux.org/${PKG_NAME}.git"
+          }
+
+          cp PKGBUILD aur-repo/
+          cp .SRCINFO aur-repo/
+          cd aur-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${{ inputs.tag }}"
+          git push origin master

@@ -1,0 +1,140 @@
+name: Publish Homebrew Formula
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        type: string
+        required: true
+      tap-repo:
+        description: 'Homebrew tap repository (e.g. owner/homebrew-tap)'
+        type: string
+        required: true
+      formula-name:
+        description: 'Formula name (defaults to binary-name)'
+        type: string
+        default: ''
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier (e.g. MIT, Apache-2.0)'
+        type: string
+        default: ''
+      source-repo:
+        description: 'Source repository (defaults to github.repository)'
+        type: string
+        default: ''
+    secrets:
+      tap-token:
+        description: 'GitHub token with push access to tap repo'
+        required: true
+
+jobs:
+  publish:
+    name: Publish Homebrew formula
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gather release info
+        id: info
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          NAME="${{ inputs.formula-name || inputs.binary-name }}"
+          CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${TAG}/checksums-sha256.txt"
+
+          curl -fsSL "$CHECKSUMS_URL" -o checksums.txt
+
+          # Extract checksums for macOS and Linux
+          DARWIN_ARM_ARCHIVE="${{ inputs.binary-name }}-aarch64-apple-darwin-${TAG}.tar.gz"
+          DARWIN_X86_ARCHIVE="${{ inputs.binary-name }}-x86_64-apple-darwin-${TAG}.tar.gz"
+          LINUX_X86_ARCHIVE="${{ inputs.binary-name }}-x86_64-unknown-linux-gnu-${TAG}.tar.gz"
+          LINUX_ARM_ARCHIVE="${{ inputs.binary-name }}-aarch64-unknown-linux-gnu-${TAG}.tar.gz"
+
+          get_hash() {
+            grep "$1" checksums.txt | cut -d' ' -f1 || echo ""
+          }
+
+          echo "formula-name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "darwin-arm-hash=$(get_hash "$DARWIN_ARM_ARCHIVE")" >> "$GITHUB_OUTPUT"
+          echo "darwin-x86-hash=$(get_hash "$DARWIN_X86_ARCHIVE")" >> "$GITHUB_OUTPUT"
+          echo "linux-x86-hash=$(get_hash "$LINUX_X86_ARCHIVE")" >> "$GITHUB_OUTPUT"
+          echo "linux-arm-hash=$(get_hash "$LINUX_ARM_ARCHIVE")" >> "$GITHUB_OUTPUT"
+
+      - name: Generate formula
+        run: |
+          REPO="${{ steps.info.outputs.repo }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          NAME="${{ steps.info.outputs.formula-name }}"
+          # Capitalize first letter for class name
+          CLASS_NAME="$(echo "$NAME" | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)}1' | sed 's/ //g')"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          cat > formula.rb << FORMULA_EOF
+          class ${CLASS_NAME} < Formula
+            desc "${{ inputs.description || format('{0} binary', inputs.binary-name) }}"
+            homepage "${{ inputs.homepage || format('https://github.com/{0}', steps.info.outputs.repo) }}"
+            version "${VERSION}"
+            license "${{ inputs.license }}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${BASE_URL}/${{ inputs.binary-name }}-aarch64-apple-darwin-${TAG}.tar.gz"
+                sha256 "${{ steps.info.outputs.darwin-arm-hash }}"
+              else
+                url "${BASE_URL}/${{ inputs.binary-name }}-x86_64-apple-darwin-${TAG}.tar.gz"
+                sha256 "${{ steps.info.outputs.darwin-x86-hash }}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${BASE_URL}/${{ inputs.binary-name }}-aarch64-unknown-linux-gnu-${TAG}.tar.gz"
+                sha256 "${{ steps.info.outputs.linux-arm-hash }}"
+              else
+                url "${BASE_URL}/${{ inputs.binary-name }}-x86_64-unknown-linux-gnu-${TAG}.tar.gz"
+                sha256 "${{ steps.info.outputs.linux-x86-hash }}"
+              end
+            end
+
+            def install
+              bin.install "${{ inputs.binary-name }}"
+            end
+
+            test do
+              system "#{bin}/${{ inputs.binary-name }}", "--help"
+            end
+          end
+          FORMULA_EOF
+
+          # Clean up leading whitespace from heredoc
+          sed -i 's/^          //' formula.rb
+          cat formula.rb
+
+      - name: Push formula to tap
+        run: |
+          TAP_REPO="${{ inputs.tap-repo }}"
+          NAME="${{ steps.info.outputs.formula-name }}"
+
+          git clone "https://x-access-token:${{ secrets.tap-token }}@github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp formula.rb "tap/Formula/${NAME}.rb"
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Formula/${NAME}.rb"
+          git commit -m "Update ${NAME} to ${{ inputs.tag }}"
+          git push

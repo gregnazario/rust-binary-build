@@ -1,0 +1,286 @@
+name: Rust Binary Build & Release
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary to build'
+        type: string
+        required: true
+      package-name:
+        description: 'Cargo package name (defaults to binary-name)'
+        type: string
+        default: ''
+      targets:
+        description: 'JSON array of target keys to build'
+        type: string
+        required: true
+      rust-toolchain:
+        description: 'Rust toolchain version'
+        type: string
+        default: 'stable'
+      profile:
+        description: 'Cargo build profile'
+        type: string
+        default: 'release'
+      features:
+        description: 'Comma-separated feature list'
+        type: string
+        default: ''
+      all-features:
+        description: 'Enable all features'
+        type: boolean
+        default: false
+      no-default-features:
+        description: 'Disable default features'
+        type: boolean
+        default: false
+      extra-build-args:
+        description: 'Additional cargo build arguments'
+        type: string
+        default: ''
+      manifest-path:
+        description: 'Path to Cargo.toml'
+        type: string
+        default: 'Cargo.toml'
+      include-files:
+        description: 'Glob of files to include in archive alongside binary'
+        type: string
+        default: 'LICENSE* README*'
+      archive-name-template:
+        description: 'Template for archive naming: {name}-{target}-{version}'
+        type: string
+        default: '{name}-{target}-{version}'
+      tag:
+        description: 'Release tag (defaults to github.ref_name)'
+        type: string
+        default: ''
+      draft:
+        description: 'Create draft release'
+        type: boolean
+        default: false
+      generate-install-sh:
+        description: 'Generate POSIX install script'
+        type: boolean
+        default: true
+      generate-install-ps1:
+        description: 'Generate PowerShell install script'
+        type: boolean
+        default: true
+      pre-build-script:
+        description: 'Script to run before build'
+        type: string
+        default: ''
+      post-build-script:
+        description: 'Script to run after build'
+        type: string
+        default: ''
+    secrets:
+      github-token:
+        description: 'GitHub token for release publishing'
+        required: true
+    outputs:
+      version:
+        description: 'Released version (without v prefix)'
+        value: ${{ jobs.prepare.outputs.version }}
+      tag:
+        description: 'Release tag'
+        value: ${{ jobs.prepare.outputs.tag }}
+      is-prerelease:
+        description: 'Whether this is a pre-release'
+        value: ${{ jobs.prepare.outputs.is-prerelease }}
+      release-url:
+        description: 'URL of the GitHub Release'
+        value: ${{ jobs.release.outputs.release-url }}
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is-prerelease: ${{ steps.version.outputs.is-prerelease }}
+    steps:
+      - name: Checkout action repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.action_repository || github.repository }}
+          ref: ${{ github.action_ref || github.ref }}
+          path: _action
+
+      - name: Determine version and tag
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.ref_name }}"
+          fi
+          VERSION="${TAG#v}"
+
+          IS_PRERELEASE="false"
+          case "$TAG" in
+            *-*) IS_PRERELEASE="true" ;;
+          esac
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "is-prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Tag: $TAG, Version: $VERSION, Pre-release: $IS_PRERELEASE"
+
+      - name: Generate build matrix
+        id: matrix
+        run: |
+          MATRIX=$(echo '${{ inputs.targets }}' | sh _action/scripts/matrix.sh)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $MATRIX"
+
+  build:
+    name: Build ${{ matrix.archive-target }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      - name: Checkout action repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.action_repository || github.repository }}
+          ref: ${{ github.action_ref || github.ref }}
+          path: _action
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.archive-target }}
+
+      - name: Install Zig + cargo-zigbuild
+        if: matrix.build-tool == 'cargo-zigbuild'
+        run: |
+          pip3 install ziglang cargo-zigbuild
+
+      - name: Install cross
+        if: matrix.build-tool == 'cross'
+        uses: taiki-e/install-action@cross
+
+      - name: Run pre-build script
+        if: inputs.pre-build-script != ''
+        run: ${{ inputs.pre-build-script }}
+
+      - name: Build binary
+        id: build
+        run: sh _action/scripts/build.sh
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+          PACKAGE_NAME: ${{ inputs.package-name || inputs.binary-name }}
+          BUILD_TOOL: ${{ matrix.build-tool }}
+          RUST_TARGET: ${{ matrix.rust-target }}
+          ZIGBUILD_TARGET: ${{ matrix.zigbuild-target }}
+          RUSTFLAGS_EXTRA: ${{ matrix.rustflags }}
+          PROFILE: ${{ inputs.profile }}
+          FEATURES: ${{ inputs.features }}
+          ALL_FEATURES: ${{ inputs.all-features }}
+          NO_DEFAULT_FEATURES: ${{ inputs.no-default-features }}
+          EXTRA_BUILD_ARGS: ${{ inputs.extra-build-args }}
+          MANIFEST_PATH: ${{ inputs.manifest-path }}
+
+      - name: Run post-build script
+        if: inputs.post-build-script != ''
+        run: ${{ inputs.post-build-script }}
+
+      - name: Package archive
+        id: archive
+        run: sh _action/scripts/archive.sh
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+          BINARY_PATH: ${{ steps.build.outputs.binary-path }}
+          ARCHIVE_TARGET: ${{ matrix.archive-target }}
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          ARCHIVE_NAME_TEMPLATE: ${{ inputs.archive-name-template }}
+          INCLUDE_FILES: ${{ inputs.include-files }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.archive-target }}
+          path: |
+            dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    outputs:
+      release-url: ${{ steps.release.outputs.url }}
+    steps:
+      - name: Checkout action repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.action_repository || github.repository }}
+          ref: ${{ github.action_ref || github.ref }}
+          path: _action
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/
+
+      - name: List release artifacts
+        run: ls -la dist/
+
+      - name: Create combined checksums file
+        run: |
+          cd dist
+          cat *.sha256 | sort > checksums-sha256.txt
+          echo "Combined checksums:"
+          cat checksums-sha256.txt
+
+      - name: Generate install.sh
+        if: inputs.generate-install-sh
+        run: |
+          sh _action/scripts/generate-install-sh.sh > dist/install.sh
+          chmod +x dist/install.sh
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+          REPO: ${{ github.repository }}
+          TARGETS: ${{ inputs.targets }}
+
+      - name: Generate install.ps1
+        if: inputs.generate-install-ps1
+        run: |
+          sh _action/scripts/generate-install-ps1.sh > dist/install.ps1
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+          REPO: ${{ github.repository }}
+          TARGETS: ${{ inputs.targets }}
+
+      - name: Create release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ needs.prepare.outputs.is-prerelease == 'true' }}
+          files: |
+            dist/*
+          fail_on_unmatched_files: false
+          token: ${{ secrets.github-token }}

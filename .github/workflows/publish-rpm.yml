@@ -1,0 +1,117 @@
+name: Publish RPM Package
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier'
+        type: string
+        default: 'MIT'
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+      targets:
+        description: 'JSON array of Linux targets to package'
+        type: string
+        default: '["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]'
+    secrets:
+      github-token:
+        description: 'GitHub token for uploading RPMs to release'
+        required: true
+
+jobs:
+  publish:
+    name: Build RPM packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rpm build tools
+        run: sudo apt-get install -y rpm
+
+      - name: Build RPM packages
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          for target in $(echo '${{ inputs.targets }}' | sed 's/\[//;s/\]//;s/"//g;s/,/ /g'); do
+            case "$target" in
+              x86_64-unknown-linux-gnu*) RPM_ARCH="x86_64" ;;
+              aarch64-unknown-linux-gnu*) RPM_ARCH="aarch64" ;;
+              *) continue ;;
+            esac
+
+            ARCHIVE="${{ inputs.binary-name }}-${target}-${TAG}.tar.gz"
+
+            echo "Building RPM for ${RPM_ARCH}..."
+
+            # Download and extract
+            curl -fsSL "${BASE_URL}/${ARCHIVE}" -o archive.tar.gz
+            mkdir -p extract
+            tar xzf archive.tar.gz -C extract
+
+            # Setup rpmbuild tree
+            mkdir -p rpmbuild/{SPECS,SOURCES,BUILD,RPMS,SRPMS}
+
+            # Find binary and place it
+            BINARY=$(find extract -name "${{ inputs.binary-name }}" -type f | head -1)
+            mkdir -p "rpmbuild/BUILD/usr/bin"
+            cp "$BINARY" "rpmbuild/BUILD/usr/bin/"
+            chmod 755 "rpmbuild/BUILD/usr/bin/${{ inputs.binary-name }}"
+
+            cat > "rpmbuild/SPECS/${{ inputs.binary-name }}.spec" << SPEC_EOF
+          Name:    ${{ inputs.binary-name }}
+          Version: ${VERSION}
+          Release: 1
+          Summary: ${{ inputs.description || inputs.binary-name }}
+          License: ${{ inputs.license }}
+          URL:     ${{ inputs.homepage || format('https://github.com/{0}', github.repository) }}
+
+          %description
+          ${{ inputs.description || inputs.binary-name }}
+
+          %install
+          mkdir -p %{buildroot}/usr/bin
+          cp %{_builddir}/usr/bin/${{ inputs.binary-name }} %{buildroot}/usr/bin/
+
+          %files
+          /usr/bin/${{ inputs.binary-name }}
+          SPEC_EOF
+
+            rpmbuild --define "_topdir $(pwd)/rpmbuild" \
+                     --define "_arch ${RPM_ARCH}" \
+                     --target "${RPM_ARCH}" \
+                     -bb "rpmbuild/SPECS/${{ inputs.binary-name }}.spec"
+
+            find rpmbuild/RPMS -name "*.rpm" -exec cp {} . \;
+            rm -rf extract archive.tar.gz rpmbuild
+          done
+
+          ls -la *.rpm 2>/dev/null || echo "No RPMs built"
+
+      - name: Upload RPMs to release
+        run: |
+          TAG="${{ inputs.tag }}"
+          for rpm in *.rpm; do
+            [ -f "$rpm" ] || continue
+            gh release upload "${TAG}" "${rpm}" --clobber --repo "${{ inputs.source-repo || github.repository }}"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}

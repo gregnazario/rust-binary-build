@@ -1,0 +1,69 @@
+name: Publish WinGet Manifest
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      publisher-id:
+        description: 'WinGet publisher ID (e.g. Owner.BinaryName)'
+        type: string
+        required: true
+      package-id:
+        description: 'WinGet package ID (e.g. Owner.BinaryName)'
+        type: string
+        required: true
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier'
+        type: string
+        default: 'MIT'
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+    secrets:
+      winget-token:
+        description: 'GitHub token for PR to winget-pkgs'
+        required: true
+
+jobs:
+  publish:
+    name: Submit WinGet manifest
+    runs-on: windows-latest
+    steps:
+      - name: Install wingetcreate
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe -UseBasicParsing
+
+      - name: Submit package
+        shell: pwsh
+        run: |
+          $repo = "${{ inputs.source-repo || github.repository }}"
+          $tag = "${{ inputs.tag }}"
+          $version = $tag.TrimStart("v")
+          $baseUrl = "https://github.com/$repo/releases/download/$tag"
+
+          $x86Url = "$baseUrl/${{ inputs.binary-name }}-x86_64-pc-windows-msvc-${tag}.zip"
+          $armUrl = "$baseUrl/${{ inputs.binary-name }}-aarch64-pc-windows-msvc-${tag}.zip"
+
+          ./wingetcreate.exe update `
+            --id "${{ inputs.package-id }}" `
+            --version "$version" `
+            --urls "$x86Url" "$armUrl" `
+            --token "${{ secrets.winget-token }}" `
+            --submit

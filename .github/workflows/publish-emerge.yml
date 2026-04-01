@@ -1,0 +1,125 @@
+name: Publish Gentoo Ebuild
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: 'Name of the binary'
+        type: string
+        required: true
+      tag:
+        description: 'Release tag'
+        type: string
+        required: true
+      description:
+        description: 'Package description'
+        type: string
+        default: ''
+      license:
+        description: 'License identifier (Gentoo format, e.g. MIT)'
+        type: string
+        default: 'MIT'
+      homepage:
+        description: 'Project homepage URL'
+        type: string
+        default: ''
+      overlay-repo:
+        description: 'Gentoo overlay repository (e.g. owner/gentoo-overlay)'
+        type: string
+        required: true
+      category:
+        description: 'Portage category (e.g. app-misc, dev-util)'
+        type: string
+        default: 'app-misc'
+      source-repo:
+        description: 'Source repository'
+        type: string
+        default: ''
+    secrets:
+      overlay-token:
+        description: 'GitHub token with push access to overlay repo'
+        required: true
+
+jobs:
+  publish:
+    name: Publish Gentoo ebuild
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gather release info
+        id: info
+        run: |
+          REPO="${{ inputs.source-repo || github.repository }}"
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "base-url=$BASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Generate ebuild
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          REPO="${{ steps.info.outputs.repo }}"
+          BASE_URL="${{ steps.info.outputs.base-url }}"
+          TAG="${{ inputs.tag }}"
+          HOMEPAGE="${{ inputs.homepage || format('https://github.com/{0}', steps.info.outputs.repo) }}"
+
+          cat > "${{ inputs.binary-name }}-${VERSION}.ebuild" << 'EBUILD_EOF'
+          # Copyright 2024 Gentoo Authors
+          # Distributed under the terms of the GNU General Public License v2
+
+          EAPI=8
+
+          DESCRIPTION="${{ inputs.description || inputs.binary-name }}"
+          HOMEPAGE="HOMEPAGE_PLACEHOLDER"
+          SRC_URI="
+            amd64? ( BASE_URL_PLACEHOLDER/${{ inputs.binary-name }}-x86_64-unknown-linux-gnu-TAG_PLACEHOLDER.tar.gz )
+            arm64? ( BASE_URL_PLACEHOLDER/${{ inputs.binary-name }}-aarch64-unknown-linux-gnu-TAG_PLACEHOLDER.tar.gz )
+          "
+
+          LICENSE="${{ inputs.license }}"
+          SLOT="0"
+          KEYWORDS="~amd64 ~arm64"
+
+          DEPEND=""
+          RDEPEND="${DEPEND}"
+
+          S="${WORKDIR}"
+
+          src_install() {
+            local binary
+            binary=$(find . -name "${{ inputs.binary-name }}" -type f | head -1)
+            dobin "${binary}"
+          }
+          EBUILD_EOF
+
+          sed -i "s|HOMEPAGE_PLACEHOLDER|${HOMEPAGE}|g" "${{ inputs.binary-name }}-${VERSION}.ebuild"
+          sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" "${{ inputs.binary-name }}-${VERSION}.ebuild"
+          sed -i "s|TAG_PLACEHOLDER|${TAG}|g" "${{ inputs.binary-name }}-${VERSION}.ebuild"
+
+          cat "${{ inputs.binary-name }}-${VERSION}.ebuild"
+
+      - name: Push to overlay
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          OVERLAY_REPO="${{ inputs.overlay-repo }}"
+          CATEGORY="${{ inputs.category }}"
+          PKG="${{ inputs.binary-name }}"
+
+          git clone "https://x-access-token:${{ secrets.overlay-token }}@github.com/${OVERLAY_REPO}.git" overlay
+          mkdir -p "overlay/${CATEGORY}/${PKG}"
+
+          cp "${PKG}-${VERSION}.ebuild" "overlay/${CATEGORY}/${PKG}/"
+
+          # Generate manifest (basic — just the ebuild)
+          cd "overlay/${CATEGORY}/${PKG}"
+          # Create Manifest with ebuild hash
+          sha512sum "${PKG}-${VERSION}.ebuild" | awk '{print "EBUILD", $2, length, "SHA512", $1}' > Manifest
+
+          cd "$(git rev-parse --show-toplevel)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${CATEGORY}/${PKG}/"
+          git commit -m "Update ${CATEGORY}/${PKG} to ${VERSION}"
+          git push
