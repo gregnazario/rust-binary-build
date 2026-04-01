@@ -18,7 +18,9 @@ set -eu
 : "${BINARY_PATH:?BINARY_PATH is required}"
 : "${ARCHIVE_TARGET:?ARCHIVE_TARGET is required}"
 : "${VERSION:?VERSION is required}"
-: "${ARCHIVE_NAME_TEMPLATE:={name}-{target}-{version}}"
+if [ -z "${ARCHIVE_NAME_TEMPLATE:-}" ]; then
+  ARCHIVE_NAME_TEMPLATE='{name}-{target}-{version}'
+fi
 : "${INCLUDE_FILES:=LICENSE* README*}"
 : "${OUTPUT_DIR:=dist}"
 
@@ -39,6 +41,8 @@ case "$ARCHIVE_TARGET" in
 esac
 
 mkdir -p "$OUTPUT_DIR"
+# Resolve to absolute path so it works from any working directory
+OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
 
 # Create staging directory
 staging_dir=$(mktemp -d)
@@ -73,16 +77,16 @@ case "$ARCHIVE_TARGET" in
     if command -v pwsh >/dev/null 2>&1; then
       pwsh -NoProfile -Command "Compress-Archive -Path '$staging_inner/*' -DestinationPath '$OUTPUT_DIR/$archive_name'"
     elif command -v 7z >/dev/null 2>&1; then
-      (cd "$staging_dir" && 7z a -tzip "../$OUTPUT_DIR/$archive_name" "$archive_base/")
+      (cd "$staging_dir" && 7z a -tzip "$OUTPUT_DIR/$archive_name" "$archive_base/")
     elif command -v zip >/dev/null 2>&1; then
-      (cd "$staging_dir" && zip -r "../$OUTPUT_DIR/$archive_name" "$archive_base/")
+      (cd "$staging_dir" && zip -r "$OUTPUT_DIR/$archive_name" "$archive_base/")
     else
       echo "ERROR: No zip tool available (need pwsh, 7z, or zip)" >&2
       exit 1
     fi
     ;;
   *)
-    (cd "$staging_dir" && tar czf "../$OUTPUT_DIR/$archive_name" "$archive_base/")
+    (cd "$staging_dir" && tar czf "$OUTPUT_DIR/$archive_name" "$archive_base/")
     ;;
 esac
 

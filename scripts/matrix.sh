@@ -6,8 +6,14 @@ set -eu
 
 TARGETS="${TARGETS:-$(cat)}"
 
-# Strip JSON array syntax and iterate
-echo "$TARGETS" | sed 's/\[//;s/\]//;s/"//g;s/,/ /g' | tr ' ' '\n' | while read -r target; do
+# Use a temp file so errors in the loop propagate (pipes swallow exit codes)
+TMP_FILE=$(mktemp)
+trap 'rm -f "$TMP_FILE"' EXIT
+
+# Parse target list
+target_list=$(echo "$TARGETS" | sed 's/\[//;s/\]//;s/"//g;s/,/ /g')
+
+for target in $target_list; do
   [ -z "$target" ] && continue
 
   runner=""
@@ -92,25 +98,24 @@ echo "$TARGETS" | sed 's/\[//;s/\]//;s/"//g;s/,/ /g' | tr ' ' '\n' | while read 
       archive_target="aarch64-unknown-linux-gnu-glibc2.17"
       ;;
     *)
-      echo "Unknown target: $target" >&2
+      echo "ERROR: Unknown target: $target" >&2
       exit 1
       ;;
   esac
 
-  # Output one JSON object per line (assembled into array below)
   printf '{"target":"%s","rust-target":"%s","runner":"%s","build-tool":"%s","zigbuild-target":"%s","rustflags":"%s","archive-target":"%s"}\n' \
-    "$target" "$rust_target" "$runner" "$build_tool" "$zigbuild_target" "$rustflags" "$archive_target"
-done | {
-  # Collect lines into a JSON array
-  first=true
-  printf '['
-  while IFS= read -r line; do
-    if [ "$first" = true ]; then
-      first=false
-    else
-      printf ','
-    fi
-    printf '%s' "$line"
-  done
-  printf ']'
-}
+    "$target" "$rust_target" "$runner" "$build_tool" "$zigbuild_target" "$rustflags" "$archive_target" >> "$TMP_FILE"
+done
+
+# Assemble JSON array from temp file
+first=true
+printf '['
+while IFS= read -r line; do
+  if [ "$first" = true ]; then
+    first=false
+  else
+    printf ','
+  fi
+  printf '%s' "$line"
+done < "$TMP_FILE"
+printf ']'
