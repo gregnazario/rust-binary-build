@@ -75,6 +75,14 @@ on:
         description: 'Script to run after build'
         type: string
         default: ''
+      action-repo:
+        description: 'Repository containing the action scripts (defaults to gregnazario/rust-binary-build)'
+        type: string
+        default: 'gregnazario/rust-binary-build'
+      action-ref:
+        description: 'Git ref of the action repo to use'
+        type: string
+        default: 'main'
     secrets:
       github-token:
         description: 'GitHub token for release publishing'
@@ -109,8 +117,8 @@ jobs:
       - name: Checkout action repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.action_repository || github.repository }}
-          ref: ${{ github.action_ref || github.ref }}
+          repository: ${{ inputs.action-repo }}
+          ref: ${{ inputs.action-ref }}
           path: _action
 
       - name: Determine version and tag
@@ -154,8 +162,8 @@ jobs:
       - name: Checkout action repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.action_repository || github.repository }}
-          ref: ${{ github.action_ref || github.ref }}
+          repository: ${{ inputs.action-repo }}
+          ref: ${{ inputs.action-ref }}
           path: _action
 
       - name: Install Rust toolchain
@@ -232,8 +240,8 @@ jobs:
       - name: Checkout action repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.action_repository || github.repository }}
-          ref: ${{ github.action_ref || github.ref }}
+          repository: ${{ inputs.action-repo }}
+          ref: ${{ inputs.action-ref }}
           path: _action
 
       - name: Download all artifacts
