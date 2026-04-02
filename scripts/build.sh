@@ -95,7 +95,15 @@ esac
 echo "::endgroup::"
 
 # Determine binary path
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+# When --manifest-path is used, cargo outputs to <manifest-dir>/target/ unless CARGO_TARGET_DIR is set
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  if [ "$MANIFEST_PATH" != "Cargo.toml" ]; then
+    MANIFEST_DIR=$(dirname "$MANIFEST_PATH")
+    CARGO_TARGET_DIR="$MANIFEST_DIR/target"
+  else
+    CARGO_TARGET_DIR="target"
+  fi
+fi
 PROFILE_DIR="$PROFILE"
 if [ "$PROFILE" = "dev" ]; then
   PROFILE_DIR="debug"
