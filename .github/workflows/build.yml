@@ -151,6 +151,9 @@ jobs:
     name: Build ${{ matrix.archive-target }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -174,7 +177,6 @@ jobs:
 
       - name: Resolve workspace root
         id: workspace
-        shell: bash
         run: |
           MANIFEST="${{ inputs.manifest-path }}"
           WORKSPACE_DIR=$(dirname "$MANIFEST")
