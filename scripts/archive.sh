@@ -73,15 +73,13 @@ ls -la "$staging_inner/"
 # Create archive
 case "$ARCHIVE_TARGET" in
   *-windows-*)
-    # On Windows runners, use PowerShell; on Linux (cross-compile), use 7z or zip
-    if command -v pwsh >/dev/null 2>&1; then
-      pwsh -NoProfile -Command "Compress-Archive -Path '$staging_inner/*' -DestinationPath '$OUTPUT_DIR/$archive_name'"
-    elif command -v 7z >/dev/null 2>&1; then
+    # Use 7z (available on all GitHub runners) or zip; avoid pwsh path issues
+    if command -v 7z >/dev/null 2>&1; then
       (cd "$staging_dir" && 7z a -tzip "$OUTPUT_DIR/$archive_name" "$archive_base/")
     elif command -v zip >/dev/null 2>&1; then
       (cd "$staging_dir" && zip -r "$OUTPUT_DIR/$archive_name" "$archive_base/")
     else
-      echo "ERROR: No zip tool available (need pwsh, 7z, or zip)" >&2
+      echo "ERROR: No zip tool available (need 7z or zip)" >&2
       exit 1
     fi
     ;;
