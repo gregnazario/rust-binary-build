@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
@@ -176,7 +176,7 @@ jobs:
     name: Test install script generation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate install.sh with all 11 targets
         run: |
@@ -192,8 +192,10 @@ jobs:
       - name: Test --help flag
         run: /tmp/install-all.sh --help
 
-      - name: Verify all targets appear in generated script
+      - name: Verify key targets appear in generated script
         run: |
+          # Check that non-compat targets appear (compat targets only appear as
+          # fallback when the standard target is absent)
           for target in \
             x86_64-unknown-linux-gnu \
             aarch64-unknown-linux-gnu \
@@ -201,15 +203,23 @@ jobs:
             aarch64-unknown-linux-musl \
             aarch64-apple-darwin \
             x86_64-apple-darwin \
-            x86_64-unknown-freebsd \
-            x86_64-unknown-linux-gnu-glibc2.17 \
-            aarch64-unknown-linux-gnu-glibc2.17; do
+            x86_64-unknown-freebsd; do
             if ! grep -q "$target" /tmp/install-all.sh; then
               echo "FAIL: Target $target missing from install.sh"
               exit 1
             fi
             echo "✓ $target found"
           done
+
+      - name: Verify glibc2.17 fallback when standard target absent
+        run: |
+          # When only glibc2.17 target is provided (no standard gnu), it should appear
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-unknown-linux-gnu-glibc2.17"]' \
+          sh scripts/generate-install-sh.sh > /tmp/install-compat.sh
+          grep -q 'x86_64-unknown-linux-gnu-glibc2.17' /tmp/install-compat.sh
+          echo "✓ glibc2.17 target used as fallback when standard gnu absent"
 
       - name: Generate with minimal targets
         run: |
@@ -251,7 +261,7 @@ jobs:
     name: Test matrix generation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Test all 11 targets
         run: |

@@ -20,7 +20,7 @@ jobs:
     name: Test install.sh generation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate with all targets
         run: |
@@ -64,7 +64,7 @@ jobs:
     name: Test install.ps1 generation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate with Windows targets
         run: |

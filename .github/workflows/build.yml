@@ -115,7 +115,7 @@ jobs:
       is-prerelease: ${{ steps.version.outputs.is-prerelease }}
     steps:
       - name: Checkout action repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.action-repo }}
           ref: ${{ inputs.action-ref }}
@@ -160,10 +160,10 @@ jobs:
         include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout caller repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Checkout action repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.action-repo }}
           ref: ${{ inputs.action-ref }}
@@ -240,7 +240,7 @@ jobs:
           INCLUDE_FILES: ${{ inputs.include-files }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.archive-target }}
           path: |
@@ -255,14 +255,14 @@ jobs:
       release-url: ${{ steps.release.outputs.url }}
     steps:
       - name: Checkout action repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.action-repo }}
           ref: ${{ inputs.action-ref }}
           path: _action
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
