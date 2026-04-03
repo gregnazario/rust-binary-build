@@ -67,13 +67,6 @@ jobs:
           test -f dist/sample-binary-x86_64-pc-windows-msvc-v0.1.0-test.zip.sha256
           echo "✓ All per-archive checksum files present"
 
-      - name: Verify combined checksums file
-        run: |
-          echo "=== Checking combined checksums ==="
-          test -f dist/checksums-sha256.txt
-          wc -l < dist/checksums-sha256.txt
-          echo "✓ checksums-sha256.txt exists"
-
       - name: Verify checksums match
         run: |
           echo "=== Verifying SHA-256 checksums ==="
@@ -156,20 +149,19 @@ jobs:
           test -f "$EXTRACT_DIR/sample-binary.exe"
           echo "✓ Windows .exe exists in archive"
 
-      - name: Verify install.sh was generated
+      - name: Verify release assets (checksums + install scripts)
         run: |
-          echo "=== Checking install scripts ==="
-          test -f dist/install.sh
-          head -5 dist/install.sh
-          grep -q "BINARY_NAME=\"sample-binary\"" dist/install.sh
-          grep -q "resolve_target" dist/install.sh
-          echo "✓ install.sh exists and contains expected content"
-
-      - name: Verify install.ps1 was generated
-        run: |
-          test -f dist/install.ps1
-          grep -q "sample-binary" dist/install.ps1
-          echo "✓ install.ps1 exists and contains expected content"
+          echo "=== Checking release assets ==="
+          ASSETS=$(gh release view v0.1.0-test --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+          echo "$ASSETS"
+          echo "$ASSETS" | grep -q 'checksums-sha256.txt'
+          echo "✓ checksums-sha256.txt on release"
+          echo "$ASSETS" | grep -q 'install.sh'
+          echo "✓ install.sh on release"
+          echo "$ASSETS" | grep -q 'install.ps1'
+          echo "✓ install.ps1 on release"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Phase 3: Test install script generation ────────────────────
   test-install-scripts:
