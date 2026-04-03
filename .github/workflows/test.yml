@@ -7,18 +7,21 @@ on:
       - 'scripts/**'
       - '.github/workflows/build.yml'
       - '.github/workflows/test.yml'
+      - 'tests/**'
   pull_request:
     branches: [main]
     paths:
       - 'scripts/**'
       - '.github/workflows/build.yml'
       - '.github/workflows/test.yml'
+      - 'tests/**'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # ── Phase 1: Build across 3 OS platforms ───────────────────────
   test-build:
     uses: ./.github/workflows/build.yml
     with:
@@ -30,6 +33,7 @@ jobs:
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
+  # ── Phase 2: Verify artifacts ──────────────────────────────────
   verify-artifacts:
     name: Verify build artifacts
     needs: test-build
@@ -45,36 +49,272 @@ jobs:
       - name: List artifacts
         run: ls -la dist/
 
-      - name: Verify archives exist
+      - name: Verify all expected archives exist
         run: |
+          echo "=== Checking archive presence ==="
           test -f dist/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test.tar.gz
+          echo "✓ Linux x86_64 tar.gz"
           test -f dist/sample-binary-aarch64-apple-darwin-v0.1.0-test.tar.gz
+          echo "✓ macOS ARM tar.gz"
           test -f dist/sample-binary-x86_64-pc-windows-msvc-v0.1.0-test.zip
-          echo "All expected archives found"
+          echo "✓ Windows x86_64 zip"
 
-      - name: Verify checksums
+      - name: Verify per-archive SHA-256 checksum files exist
         run: |
+          echo "=== Checking per-archive checksum files ==="
+          test -f dist/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test.tar.gz.sha256
+          test -f dist/sample-binary-aarch64-apple-darwin-v0.1.0-test.tar.gz.sha256
+          test -f dist/sample-binary-x86_64-pc-windows-msvc-v0.1.0-test.zip.sha256
+          echo "✓ All per-archive checksum files present"
+
+      - name: Verify combined checksums file
+        run: |
+          echo "=== Checking combined checksums ==="
+          test -f dist/checksums-sha256.txt
+          wc -l < dist/checksums-sha256.txt
+          echo "✓ checksums-sha256.txt exists"
+
+      - name: Verify checksums match
+        run: |
+          echo "=== Verifying SHA-256 checksums ==="
           cd dist
           for f in *.sha256; do
+            [ "$f" = "checksums-sha256.txt" ] && continue
             archive="${f%.sha256}"
             if [ -f "$archive" ]; then
               expected=$(cut -d' ' -f1 "$f")
               actual=$(sha256sum "$archive" | cut -d' ' -f1)
               if [ "$expected" != "$actual" ]; then
                 echo "FAIL: Checksum mismatch for $archive"
+                echo "  Expected: $expected"
+                echo "  Actual:   $actual"
                 exit 1
               fi
-              echo "OK: $archive"
+              echo "✓ $archive checksum verified"
             fi
           done
 
-      - name: Verify tar.gz extracts correctly
+      - name: Verify tar.gz structure (Linux)
         run: |
-          mkdir -p /tmp/extract-test
-          tar xzf dist/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test.tar.gz -C /tmp/extract-test
-          test -f /tmp/extract-test/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test/sample-binary
-          echo "Extract and binary check passed"
+          echo "=== Verifying Linux tar.gz structure ==="
+          mkdir -p /tmp/extract-linux
+          tar xzf dist/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test.tar.gz -C /tmp/extract-linux
 
+          # Check directory structure: should be {name}-{target}-{version}/
+          EXTRACT_DIR="/tmp/extract-linux/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test"
+          test -d "$EXTRACT_DIR"
+          echo "✓ Archive contains expected directory"
+
+          # Check binary exists and is executable
+          test -f "$EXTRACT_DIR/sample-binary"
+          test -x "$EXTRACT_DIR/sample-binary"
+          echo "✓ Binary exists and is executable"
+
+          # Check LICENSE was included
+          test -f "$EXTRACT_DIR/LICENSE"
+          echo "✓ LICENSE file included in archive"
+
+      - name: Run the Linux binary
+        run: |
+          echo "=== Running Linux binary ==="
+          BINARY="/tmp/extract-linux/sample-binary-x86_64-unknown-linux-gnu-v0.1.0-test/sample-binary"
+
+          # Test default output
+          OUTPUT=$("$BINARY")
+          echo "Output: $OUTPUT"
+          echo "$OUTPUT" | grep -q "Hello from sample-binary"
+          echo "✓ Default output correct"
+
+          # Test --version
+          VERSION_OUT=$("$BINARY" --version)
+          echo "Version: $VERSION_OUT"
+          echo "$VERSION_OUT" | grep -q "sample-binary 0.1.0"
+          echo "✓ --version output correct"
+
+          # Test --help
+          HELP_OUT=$("$BINARY" --help)
+          echo "$HELP_OUT" | grep -q "Usage:"
+          echo "✓ --help output correct"
+
+          # Test bad flag (should exit non-zero)
+          if "$BINARY" --bad-flag 2>/dev/null; then
+            echo "FAIL: should have exited non-zero for unknown flag"
+            exit 1
+          fi
+          echo "✓ Unknown flag rejected"
+
+      - name: Verify zip structure (Windows)
+        run: |
+          echo "=== Verifying Windows zip structure ==="
+          mkdir -p /tmp/extract-windows
+          unzip -o dist/sample-binary-x86_64-pc-windows-msvc-v0.1.0-test.zip -d /tmp/extract-windows
+
+          EXTRACT_DIR="/tmp/extract-windows/sample-binary-x86_64-pc-windows-msvc-v0.1.0-test"
+          test -d "$EXTRACT_DIR"
+          echo "✓ Archive contains expected directory"
+
+          test -f "$EXTRACT_DIR/sample-binary.exe"
+          echo "✓ Windows .exe exists in archive"
+
+      - name: Verify install.sh was generated
+        run: |
+          echo "=== Checking install scripts ==="
+          test -f dist/install.sh
+          head -5 dist/install.sh
+          grep -q "BINARY_NAME=\"sample-binary\"" dist/install.sh
+          grep -q "resolve_target" dist/install.sh
+          echo "✓ install.sh exists and contains expected content"
+
+      - name: Verify install.ps1 was generated
+        run: |
+          test -f dist/install.ps1
+          grep -q "sample-binary" dist/install.ps1
+          echo "✓ install.ps1 exists and contains expected content"
+
+  # ── Phase 3: Test install script generation ────────────────────
+  test-install-scripts:
+    name: Test install script generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate install.sh with all 11 targets
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-pc-windows-msvc","aarch64-pc-windows-msvc","aarch64-apple-darwin","x86_64-apple-darwin","x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-unknown-freebsd","x86_64-unknown-linux-gnu-glibc2.17","aarch64-unknown-linux-gnu-glibc2.17"]' \
+          sh scripts/generate-install-sh.sh > /tmp/install-all.sh
+          chmod +x /tmp/install-all.sh
+
+      - name: Verify POSIX shebang
+        run: head -1 /tmp/install-all.sh | grep -q '#!/bin/sh'
+
+      - name: Test --help flag
+        run: /tmp/install-all.sh --help
+
+      - name: Verify all targets appear in generated script
+        run: |
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-freebsd \
+            x86_64-unknown-linux-gnu-glibc2.17 \
+            aarch64-unknown-linux-gnu-glibc2.17; do
+            if ! grep -q "$target" /tmp/install-all.sh; then
+              echo "FAIL: Target $target missing from install.sh"
+              exit 1
+            fi
+            echo "✓ $target found"
+          done
+
+      - name: Generate with minimal targets
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-unknown-linux-gnu"]' \
+          sh scripts/generate-install-sh.sh > /tmp/install-minimal.sh
+          chmod +x /tmp/install-minimal.sh
+          /tmp/install-minimal.sh --help
+          # Should NOT contain macOS targets
+          if grep -q 'apple-darwin' /tmp/install-minimal.sh; then
+            echo "FAIL: Minimal script should not contain macOS targets"
+            exit 1
+          fi
+          echo "✓ Minimal script only contains requested target"
+
+      - name: Test install.ps1 generation
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]' \
+          sh scripts/generate-install-ps1.sh > /tmp/install.ps1
+          grep -q 'x86_64-pc-windows-msvc' /tmp/install.ps1
+          grep -q 'aarch64-pc-windows-msvc' /tmp/install.ps1
+          grep -q 'CmdletBinding' /tmp/install.ps1
+          echo "✓ PowerShell script generated correctly"
+
+      - name: Test install.ps1 with no Windows targets
+        run: |
+          BINARY_NAME=mytool \
+          REPO=owner/mytool \
+          TARGETS='["x86_64-unknown-linux-gnu"]' \
+          sh scripts/generate-install-ps1.sh > /tmp/install-noop.ps1
+          grep -q 'no-op' /tmp/install-noop.ps1
+          echo "✓ No-op script generated when no Windows targets"
+
+  # ── Phase 4: Test matrix.sh directly ───────────────────────────
+  test-matrix:
+    name: Test matrix generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test all 11 targets
+        run: |
+          MATRIX=$(echo '["x86_64-pc-windows-msvc","aarch64-pc-windows-msvc","aarch64-apple-darwin","x86_64-apple-darwin","x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu","x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-unknown-freebsd","x86_64-unknown-linux-gnu-glibc2.17","aarch64-unknown-linux-gnu-glibc2.17"]' | sh scripts/matrix.sh)
+
+          # Verify it's valid JSON
+          echo "$MATRIX" | python3 -m json.tool > /dev/null
+          echo "✓ Valid JSON output"
+
+          # Verify 11 entries
+          COUNT=$(echo "$MATRIX" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          if [ "$COUNT" != "11" ]; then
+            echo "FAIL: Expected 11 entries, got $COUNT"
+            exit 1
+          fi
+          echo "✓ 11 matrix entries"
+
+      - name: Verify glibc2.17 target mapping
+        run: |
+          MATRIX=$(echo '["x86_64-unknown-linux-gnu-glibc2.17"]' | sh scripts/matrix.sh)
+          echo "$MATRIX" | python3 -c "
+          import json, sys
+          m = json.load(sys.stdin)[0]
+          assert m['rust-target'] == 'x86_64-unknown-linux-gnu', f'rust-target wrong: {m[\"rust-target\"]}'
+          assert m['zigbuild-target'] == 'x86_64-unknown-linux-gnu.2.17', f'zigbuild-target wrong: {m[\"zigbuild-target\"]}'
+          assert m['rustflags'] == '-C target-cpu=x86-64', f'rustflags wrong: {m[\"rustflags\"]}'
+          assert m['archive-target'] == 'x86_64-unknown-linux-gnu-glibc2.17', f'archive-target wrong: {m[\"archive-target\"]}'
+          assert m['build-tool'] == 'cargo-zigbuild', f'build-tool wrong: {m[\"build-tool\"]}'
+          assert m['runner'] == 'ubuntu-latest', f'runner wrong: {m[\"runner\"]}'
+          print('✓ glibc2.17 target mapping correct')
+          "
+
+      - name: Verify FreeBSD target uses cross
+        run: |
+          MATRIX=$(echo '["x86_64-unknown-freebsd"]' | sh scripts/matrix.sh)
+          echo "$MATRIX" | python3 -c "
+          import json, sys
+          m = json.load(sys.stdin)[0]
+          assert m['build-tool'] == 'cross', f'Expected cross, got {m[\"build-tool\"]}'
+          print('✓ FreeBSD uses cross')
+          "
+
+      - name: Verify runner assignment
+        run: |
+          MATRIX=$(echo '["x86_64-pc-windows-msvc","aarch64-apple-darwin","x86_64-unknown-linux-gnu"]' | sh scripts/matrix.sh)
+          echo "$MATRIX" | python3 -c "
+          import json, sys
+          entries = {m['target']: m for m in json.load(sys.stdin)}
+          assert entries['x86_64-pc-windows-msvc']['runner'] == 'windows-latest'
+          assert entries['aarch64-apple-darwin']['runner'] == 'macos-latest'
+          assert entries['x86_64-unknown-linux-gnu']['runner'] == 'ubuntu-latest'
+          print('✓ Runner assignment correct')
+          "
+
+      - name: Test invalid target fails
+        run: |
+          if echo '["bogus-target"]' | sh scripts/matrix.sh 2>/dev/null; then
+            echo "FAIL: Should have rejected bogus target"
+            exit 1
+          fi
+          echo "✓ Invalid target rejected"
+
+  # ── Phase 5: Cleanup ───────────────────────────────────────────
   cleanup:
     name: Cleanup test release
     needs: [test-build, verify-artifacts]
@@ -84,6 +324,5 @@ jobs:
       - name: Delete test release
         run: |
           gh release delete v0.1.0-test --yes --repo "${{ github.repository }}" 2>/dev/null || true
-          git push origin :refs/tags/v0.1.0-test 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
